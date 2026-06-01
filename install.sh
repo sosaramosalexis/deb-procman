@@ -13,7 +13,7 @@ require_root() {
   if [[ "${EUID}" -ne 0 ]]; then
     echo "Please run as root: su -; bash install.sh"
     exit 1
-  }
+  fi
 }
 
 load_favorites() {
