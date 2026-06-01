@@ -161,50 +161,59 @@ show_service_menu() {
 
 show_service_list() {
   local filter="${1:-}"
+  local sort_mode="${2:-name-asc}"
+  local sort_label="Name A-Z"
 
   while true; do
     local menu_items=()
     local services=()
     local svc
+    local raw_data
+
+    raw_data=$(systemctl list-units --type=service --all --no-legend 2>/dev/null | \
+      awk '{print $1"\t"$3"\t"$4"\t"$2}')
 
     if [[ -n "$filter" ]]; then
-      while IFS=$'\t' read -r unit active enabled desc; do
-        local name="${unit%.service*}"
-        [[ -z "$name" ]] && continue
-        name="${name//\\//}"
-        local fav=" "
-        is_favorite "$name" "service" && fav="*"
-        local label="${fav} ${name}"
-        local status_text="${active}/${enabled}"
-        [[ "${#label}" -gt 28 ]] && label="${label:0:25}..."
-        services+=("$name|$active|$enabled")
-        menu_items+=("$label" "$status_text")
-      done < <(systemctl list-units --type=service --all --no-legend 2>/dev/null | \
-        awk '{print $1"\t"$3"\t"$4"\t"$2}' | grep -i "$filter" | head -100)
-    else
-      while IFS=$'\t' read -r unit active enabled desc; do
-        local name="${unit%.service*}"
-        [[ -z "$name" ]] && continue
-        name="${name//\\//}"
-        local fav=" "
-        is_favorite "$name" "service" && fav="*"
-        local label="${fav} ${name}"
-        local status_text="${active}/${enabled}"
-        [[ "${#label}" -gt 28 ]] && label="${label:0:25}..."
-        services+=("$name|$active|$enabled")
-        menu_items+=("$label" "$status_text")
-      done < <(systemctl list-units --type=service --all --no-legend 2>/dev/null | \
-        awk '{print $1"\t"$3"\t"$4"\t"$2}' | head -100)
+      raw_data=$(echo "$raw_data" | grep -i "$filter")
     fi
+
+    while IFS=$'\t' read -r unit active enabled desc; do
+      local name="${unit%.service*}"
+      [[ -z "$name" ]] && continue
+      services+=("${name}|${active}|${enabled}|${desc}")
+    done <<< "$raw_data"
+
+    case "$sort_mode" in
+      name-asc)    sort_label="Name A-Z";  services=($(printf '%s\n' "${services[@]}" | sort -t'|' -k1,1)) ;;
+      name-desc)   sort_label="Name Z-A";  services=($(printf '%s\n' "${services[@]}" | sort -t'|' -k1,1r)) ;;
+      active-first) sort_label="Active first"; services=($(printf '%s\n' "${services[@]}" | sort -t'|' -k2,2r -k1,1)) ;;
+      inactive-first) sort_label="Inactive first"; services=($(printf '%s\n' "${services[@]}" | sort -t'|' -k2,2 -k1,1)) ;;
+      enabled-first) sort_label="Enabled first"; services=($(printf '%s\n' "${services[@]}" | sort -t'|' -k3,3r -k1,1)) ;;
+      disabled-first) sort_label="Disabled first"; services=($(printf '%s\n' "${services[@]}" | sort -t'|' -k3,3 -k1,1)) ;;
+    esac
+
+    for svc in "${services[@]}"; do
+      IFS='|' read -r name active enabled desc <<< "$svc"
+      local fav=" "
+      is_favorite "$name" "service" && fav="*"
+      local label="${fav} ${name}"
+      local status_text="${active}/${enabled}"
+      [[ "${#label}" -gt 28 ]] && label="${label:0:25}..."
+      menu_items+=("$label" "$status_text")
+    done
 
     if [[ ${#menu_items[@]} -eq 0 ]]; then
       whiptail --msgbox "No services found${filter:+ matching '$filter'}." 6 45
       return
     fi
 
-    local extra_opts=()
-    [[ -z "$filter" ]] && extra_opts=("__FILTER__" "Search/filter services" "" "" "__REFRESH__" "Refresh list")
-    [[ -n "$filter" ]] && extra_opts=("__FILTER__" "Change filter (current: $filter)" "" "" "__CLEAR__" "Clear filter")
+    local extra_opts=(
+      "__FILTER__" "${filter:+Change filter (current: $filter)}"
+      "" ""
+      "__SORT__" "Sort: ${sort_label}"
+    )
+    [[ -z "$filter" ]] && extra_opts[1]="Search/filter services"
+    [[ -n "$filter" ]] && extra_opts+=("__CLEAR__" "Clear filter" "" "")
 
     local choice
     choice=$(whiptail --menu --title "Systemd Services${filter:+ (filter: $filter)}" \
@@ -216,14 +225,26 @@ show_service_list() {
 
     case "$choice" in
       __BACK__) return ;;
-      __REFRESH__) continue ;;
       __CLEAR__) filter=""; continue ;;
       __FILTER__)
         filter=$(whiptail --inputbox "Search services:" 8 50 "$filter" 3>&1 1>&2 2>&3) || filter=""
         continue
         ;;
+      __SORT__)
+        local sort_choice
+        sort_choice=$(whiptail --menu --title "Sort Services" \
+          "Current: ${sort_label}" 14 50 6 \
+          "name-asc"       "Name A-Z" \
+          "name-desc"      "Name Z-A" \
+          "active-first"   "Active first" \
+          "inactive-first" "Inactive first" \
+          "enabled-first"  "Enabled first" \
+          "disabled-first" "Disabled first" \
+          3>&1 1>&2 2>&3) || continue
+        sort_mode="$sort_choice"
+        continue
+        ;;
       *)
-        local idx=$(( (${#extra_opts[@]}/4) ))
         for ((i=0; i<${#menu_items[@]}; i+=2)); do
           if [[ "${menu_items[$i]}" == "$choice" ]]; then
             local svc_name="${services[$((i/2))]%%|*}"
@@ -238,28 +259,41 @@ show_service_list() {
 
 show_process_list() {
   local filter="${1:-}"
+  local sort_mode="${2:--pcpu}"
+  local sort_label="CPU high-low"
+  local ps_sort=""
 
   while true; do
     local menu_items=()
     local procs=()
-    local pname pid pcpu pmem
+    local pname pid cpu mem cmd
+
+    case "$sort_mode" in
+      -pcpu)    ps_sort="-pcpu";    sort_label="CPU high-low" ;;
+      pcpu)     ps_sort="pcpu";     sort_label="CPU low-high" ;;
+      -pmem)    ps_sort="-pmem";    sort_label="MEM high-low" ;;
+      pmem)     ps_sort="pmem";     sort_label="MEM low-high" ;;
+      -pid)     ps_sort="-pid";     sort_label="PID high-low" ;;
+      pid)      ps_sort="pid";      sort_label="PID low-high" ;;
+      comm)     ps_sort="comm";     sort_label="Name A-Z" ;;
+    esac
 
     while IFS='|' read -r pid cpu mem cmd; do
       pname="${cmd##*/}"
       [[ -z "$pname" ]] && pname="$cmd"
-      [[ "${#pname}" -gt 25 ]] && pname="${pname:0:22}..."
 
       if [[ -n "$filter" ]] && ! echo "$pname $cmd" | grep -qi "$filter"; then
         continue
       fi
 
+      [[ "${#pname}" -gt 25 ]] && pname="${pname:0:22}..."
       local fav=" "
       is_favorite "$pname" "process" && fav="*"
       local label="${fav} ${pname}"
       local info="PID:${pid}  CPU:${cpu}%  MEM:${mem}%"
       procs+=("${pname}|${pid}|${cmd}")
       menu_items+=("$label" "$info")
-    done < <(ps -eo pid,pcpu,pmem,comm --no-headers --sort=-pcpu 2>/dev/null | \
+    done < <(ps -eo pid,pcpu,pmem,comm --no-headers --sort="$ps_sort" 2>/dev/null | \
       awk '{print $1"|"$2"|"$3"|"$4}' | head -80)
 
     if [[ ${#menu_items[@]} -eq 0 ]]; then
@@ -267,9 +301,13 @@ show_process_list() {
       return
     fi
 
-    local extra_opts=()
-    [[ -z "$filter" ]] && extra_opts=("__FILTER__" "Search/filter processes")
-    [[ -n "$filter" ]] && extra_opts=("__FILTER__" "Change filter (current: $filter)" "" "" "__CLEAR__" "Clear filter")
+    local extra_opts=(
+      "__FILTER__" "${filter:+Change filter (current: $filter)}"
+      "" ""
+      "__SORT__" "Sort: ${sort_label}"
+    )
+    [[ -z "$filter" ]] && extra_opts[1]="Search/filter processes"
+    [[ -n "$filter" ]] && extra_opts+=("__CLEAR__" "Clear filter" "" "")
 
     local choice
     choice=$(whiptail --menu --title "Running Processes${filter:+ (filter: $filter)}" \
@@ -284,6 +322,21 @@ show_process_list() {
       __CLEAR__) filter=""; continue ;;
       __FILTER__)
         filter=$(whiptail --inputbox "Search processes:" 8 50 "$filter" 3>&1 1>&2 2>&3) || filter=""
+        continue
+        ;;
+      __SORT__)
+        local sort_choice
+        sort_choice=$(whiptail --menu --title "Sort Processes" \
+          "Current: ${sort_label}" 14 50 7 \
+          "-pcpu" "CPU high-low" \
+          "pcpu"  "CPU low-high" \
+          "-pmem" "MEM high-low" \
+          "pmem"  "MEM low-high" \
+          "-pid"  "PID high-low" \
+          "pid"   "PID low-high" \
+          "comm"  "Name A-Z" \
+          3>&1 1>&2 2>&3) || continue
+        sort_mode="$sort_choice"
         continue
         ;;
       *)
