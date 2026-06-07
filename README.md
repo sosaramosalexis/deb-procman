@@ -10,7 +10,7 @@ Interactive whiptail-based process and service manager for Debian/Ubuntu.
 
 ```bash
 su -
-bash <(curl -fsSL https://raw.githubusercontent.com/sosramalex/deb-procman/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/sosaramosalexis/deb-procman/main/install.sh)
 ```
 
 ## Features
